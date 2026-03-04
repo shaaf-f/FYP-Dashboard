@@ -1,0 +1,2 @@
+INSERT INTO `parking_bays` (bay_name, current_status) VALUES ('Bay A-102', 'vacant');
+INSERT INTO `parking_bays` (bay_name, current_status, last_plate_detected) VALUES ('Bay A-103', 'occupied', 'BFF-029');
