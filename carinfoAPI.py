@@ -95,7 +95,7 @@ def background_worker():
             print(f"Background Worker: Database Connection Error: {e}")
         
         # Reduced to 30 seconds for testing
-        time.sleep(10)
+        time.sleep(30)
 
 def scrape_vehicle(reg_no):
     selected_profile = random.choice(PROFILES)
@@ -103,7 +103,7 @@ def scrape_vehicle(reg_no):
         driver = Driver(
             uc=True, 
             user_data_dir=selected_profile, 
-            headless=True,
+            headless=False,
             incognito=False
         )
     except Exception as e:
