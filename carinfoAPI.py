@@ -1,3 +1,4 @@
+import threading
 from fastapi import FastAPI, HTTPException
 import mysql.connector
 import random
@@ -40,13 +41,77 @@ def split_vehicle_details(details_str):
         return make, model, year
     return details_str, "Unknown", "Unknown"
 
+def background_worker():
+    print("Background Worker: Thread started successfully.")
+    while True:
+        try:
+            db = get_db_connection()
+            cursor = db.cursor(dictionary=True)
+            
+            # Find plates in bays that aren't in our cache
+            query = """
+                SELECT DISTINCT b.last_plate_detected 
+                FROM parking_bays b
+                LEFT JOIN vehicle_summary v ON b.last_plate_detected = v.registration_no
+                WHERE b.current_status = 'occupied' 
+                AND b.last_plate_detected IS NOT NULL
+                AND v.registration_no IS NULL
+            """
+            cursor.execute(query)
+            missing_plates = cursor.fetchall()
+            
+            if not missing_plates:
+                # This print tells us the thread IS alive, just has no work
+                print(f"Background Worker: Checked at {time.strftime('%H:%M:%S')} - No unidentified plates found.")
+            else:
+                print(f"Background Worker: Found {len(missing_plates)} plates to identify: {[p['last_plate_detected'] for p in missing_plates]}")
+                for row in missing_plates:
+                    plate = row['last_plate_detected']
+                    print(f"Background Worker: Launching browser for {plate}...")
+                    
+                    try:
+                        scraped = scrape_vehicle(plate)
+                        if scraped:
+                            make, model, year = split_vehicle_details(scraped['details'])
+                            
+                            save_query = """
+                                INSERT INTO vehicle_summary 
+                                (registration_no, make, vehicle_model, model_year, engine_no) 
+                                VALUES (%s, %s, %s, %s, %s)
+                            """
+                            save_cursor = db.cursor()
+                            save_cursor.execute(save_query, (
+                                scraped['registration_no'], make, model, year, scraped['engine_no']
+                            ))
+                            db.commit()
+                            print(f"Background Worker: Database updated for {plate}")
+                        else:
+                            print(f"Background Worker: Scrape failed (No data) for {plate}")
+                    except Exception as e:
+                        print(f"Background Worker: Scrape Error for {plate}: {e}")
+            
+            db.close()
+        except Exception as e:
+            print(f"Background Worker: Database Connection Error: {e}")
+        
+        # Reduced to 30 seconds for testing
+        time.sleep(10)
+
 def scrape_vehicle(reg_no):
     selected_profile = random.choice(PROFILES)
-    # Using headless=True for the actual API to keep it clean, 
-    # but you can set to False if you want to watch the solve.
-    driver = Driver(uc=True, user_data_dir=selected_profile, headless=True)
+    try:
+        driver = Driver(
+            uc=True, 
+            user_data_dir=selected_profile, 
+            headless=True,
+            incognito=False
+        )
+    except Exception as e:
+        print(f"Driver Init Failed: {e}")
+        return None
     
     try:
+        driver.set_page_load_timeout(30)
         driver.get("https://excise.gos.pk/vehicle/vehicle_search")
         driver.wait_for_element("input#reg_no", timeout=20)
         driver.type("input#reg_no", reg_no)
@@ -80,6 +145,7 @@ def scrape_vehicle(reg_no):
         return None
     finally:
         driver.quit()
+
 
 @app.get("/api/dashboard/status")
 def get_dashboard_status():
@@ -161,6 +227,8 @@ def get_vehicle(reg_no: str):
     
     db.close()
     raise HTTPException(status_code=404, detail="Vehicle not found")
+
+threading.Thread(target=background_worker, daemon=True).start()
 
 if __name__ == "__main__":
     import uvicorn
