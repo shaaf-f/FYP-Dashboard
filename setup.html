@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>SmartPark - Define Bays</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background: #1e1e1e; color: #fff; }
+        /* The container scales to fit your screen */
+        .canvas-container { 
+            position: relative; 
+            width: 100%; 
+            max-width: 1200px;
+            margin: auto;
+            border: 2px solid #0d6efd;
+            aspect-ratio: 16/9; /* Forces the 1080p widescreen ratio */
+            background: #000;
+            overflow: hidden;
+        }
+        .stream-bg {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: fill;
+            z-index: 1; /* Puts it behind the canvas */
+        }
+        /* The canvas itself acts as the 1080p layer */
+        canvas { 
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%; 
+            height: 100%; 
+            cursor: crosshair; 
+            background: transparent; /* VERY IMPORTANT: Let the video show through */
+            z-index: 2; /* Puts it on top of the video */
+        }
+        .bay-item { background: #2d2d2d; border: 1px solid #444; border-radius: 5px; }
+    </style>
+</head>
+<body class="p-4">
+
+<div class="container-fluid">
+    <div class="row">
+        <div class="col-md-9">
+            <h4><span class="badge bg-primary">Step 1</span> Draw Parking Bays (1920x1080 Native)</h4>
+            <p class="text-muted">Click and drag to define a bay. The coordinates are automatically scaled to 1080p.</p>
+            
+            <div class="d-flex align-items-center mb-2">
+                <select id="cameraSelect" class="form-select me-2" onchange="changeCamera()">
+                    <option value="">Select a Camera</option>
+                </select>
+                <button class="btn btn-outline-info text-nowrap" onclick="addNewCamera()">+ Add Camera</button>
+            </div>
+            
+            <div class="canvas-container">
+                <img id="videoStream" src="" class="stream-bg" alt="Select a camera to view stream">
+                <canvas id="drawCanvas" width="1920" height="1080"></canvas>
+            </div>
+        </div>
+
+        <div class="col-md-3">
+            <h4><span class="badge bg-success">Step 2</span> Save & Manage</h4>
+            
+            <div class="card bg-dark text-light mt-3 border-secondary">
+                <div class="card-body">
+                    <label>Bay Name:</label>
+                    <input type="text" id="bayName" class="form-control mb-2" placeholder="e.g. Bay A-1">
+                    
+                    <label>Coordinates (1080p):</label>
+                    <div class="row g-2 mb-3 text-muted" style="font-size: 0.9em;">
+                        <div class="col-6">X1: <span id="lbl-x1">0</span></div>
+                        <div class="col-6">Y1: <span id="lbl-y1">0</span></div>
+                        <div class="col-6">X2: <span id="lbl-x2">0</span></div>
+                        <div class="col-6">Y2: <span id="lbl-y2">0</span></div>
+                    </div>
+                    
+                    <button class="btn btn-success w-100" onclick="saveBay()">Save Bay to Database</button>
+                    <button class="btn btn-outline-warning w-100 mt-2" onclick="clearCurrentDrawing()">Clear Drawing</button>
+                </div>
+            </div>
+
+            <h5 class="mt-4 border-bottom border-secondary pb-2">Existing Bays</h5>
+            <div id="existing-bays">
+                </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    const API_URL_BAYS = 'http://127.0.0.1:8000/api/bays';
+    const API_URL_CAMERAS = 'http://127.0.0.1:8000/api/cameras';
+    
+    const canvas = document.getElementById('drawCanvas');
+    const ctx = canvas.getContext('2d');
+    
+    let isDrawing = false;
+    let startX = 0, startY = 0;
+    let currentX = 0, currentY = 0;
+    
+    let savedBays = []; 
+    let currentCameraId = null;
+    let currentStreamIndex = null;
+
+    // --- INITIALIZATION ---
+    async function init() {
+        await loadCameras();
+        await loadBays();
+    }
+
+    // --- CAMERA LOGIC ---
+    async function loadCameras() {
+        try {
+            const response = await fetch(API_URL_CAMERAS);
+            const data = await response.json();
+            const select = document.getElementById('cameraSelect');
+            select.innerHTML = '<option value="">Select a Camera</option>';
+            
+            data.cameras.forEach(cam => {
+                select.innerHTML += `<option value="${cam.id}" data-stream="${cam.stream_index}">${cam.camera_name}</option>`;
+            });
+        } catch (e) { console.error("Could not load cameras", e); }
+    }
+
+    async function addNewCamera() {
+        const name = prompt("Enter Camera Name (e.g., Gate 1):");
+        const stream = prompt("Enter Camera Index (e.g., 0, 1, or RTSP URL):");
+        if (name && stream) {
+            try {
+                await fetch(API_URL_CAMERAS, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ camera_name: name, stream_index: stream })
+                });
+                loadCameras();
+            } catch (e) { alert("Failed to add camera"); }
+        }
+    }
+
+    function changeCamera() {
+        const select = document.getElementById('cameraSelect');
+        if (!select.value) {
+            currentCameraId = null;
+            currentStreamIndex = null;
+            document.getElementById('videoStream').src = "";
+            renderBayList();
+            redrawCanvas();
+            return;
+        }
+        
+        currentCameraId = parseInt(select.value);
+        currentStreamIndex = select.options[select.selectedIndex].getAttribute('data-stream');
+        
+        // Update the video feed source dynamically
+        document.getElementById('videoStream').src = `http://127.0.0.1:8000/api/video_feed/${currentStreamIndex}`;
+        
+        // Redraw lists and canvas for this specific camera
+        renderBayList();
+        redrawCanvas();
+    }
+
+    // --- BAY LOGIC ---
+    async function loadBays() {
+        try {
+            const response = await fetch(API_URL_BAYS);
+            const data = await response.json();
+            savedBays = data.bays;
+            renderBayList();
+            redrawCanvas();
+        } catch (e) { console.error("Could not load bays", e); }
+    }
+
+    function renderBayList() {
+        const list = document.getElementById('existing-bays');
+        list.innerHTML = '';
+        
+        if (!currentCameraId) {
+            list.innerHTML = '<div class="text-muted small">Select a camera to see bays.</div>';
+            return;
+        }
+
+        // Filter bays by selected camera
+        const filteredBays = savedBays.filter(b => b.camera_id === currentCameraId);
+        
+        filteredBays.forEach(bay => {
+            list.innerHTML += `
+                <div class="bay-item p-2 mb-2 d-flex justify-content-between align-items-center">
+                    <div>
+                        <strong>${bay.bay_name}</strong><br>
+                        <small class="text-muted">(${bay.x_min}, ${bay.y_min}) to (${bay.x_max}, ${bay.y_max})</small>
+                    </div>
+                    <button class="btn btn-sm btn-danger" onclick="deleteBay(${bay.id})">X</button>
+                </div>
+            `;
+        });
+    }
+
+    // --- DRAWING LOGIC ---
+    function getScaledMousePos(evt) {
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = canvas.width / rect.width;
+        const scaleY = canvas.height / rect.height;
+        return {
+            x: Math.round((evt.clientX - rect.left) * scaleX),
+            y: Math.round((evt.clientY - rect.top) * scaleY)
+        };
+    }
+
+    canvas.addEventListener('mousedown', (e) => {
+        if (!currentCameraId) return alert("Please select a camera first!");
+        const pos = getScaledMousePos(e);
+        startX = pos.x;
+        startY = pos.y;
+        isDrawing = true;
+    });
+
+    canvas.addEventListener('mousemove', (e) => {
+        if (!isDrawing) return;
+        const pos = getScaledMousePos(e);
+        currentX = pos.x;
+        currentY = pos.y;
+        
+        document.getElementById('lbl-x1').innerText = startX;
+        document.getElementById('lbl-y1').innerText = startY;
+        document.getElementById('lbl-x2').innerText = currentX;
+        document.getElementById('lbl-y2').innerText = currentY;
+
+        redrawCanvas();
+        
+        ctx.strokeStyle = '#0d6efd';
+        ctx.lineWidth = 4;
+        ctx.strokeRect(startX, startY, currentX - startX, currentY - startY);
+    });
+
+    canvas.addEventListener('mouseup', () => { isDrawing = false; });
+
+    function clearCurrentDrawing() {
+        startX = 0; startY = 0; currentX = 0; currentY = 0;
+        document.getElementById('lbl-x1').innerText = 0;
+        document.getElementById('lbl-y1').innerText = 0;
+        document.getElementById('lbl-x2').innerText = 0;
+        document.getElementById('lbl-y2').innerText = 0;
+        redrawCanvas();
+    }
+
+    function redrawCanvas() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        if (!currentCameraId) return;
+
+        // Draw only the bays for the selected camera
+        const filteredBays = savedBays.filter(b => b.camera_id === currentCameraId);
+        
+        filteredBays.forEach(bay => {
+            ctx.strokeStyle = '#2ecc71'; 
+            ctx.lineWidth = 4;
+            const w = bay.x_max - bay.x_min;
+            const h = bay.y_max - bay.y_min;
+            ctx.strokeRect(bay.x_min, bay.y_min, w, h);
+            
+            ctx.fillStyle = '#2ecc71';
+            ctx.font = '30px Arial';
+            ctx.fillText(bay.bay_name, bay.x_min + 10, bay.y_min + 35);
+        });
+    }
+
+    // --- API POST/DELETE ---
+    async function saveBay() {
+        if (!currentCameraId) return alert("Select a camera before saving!");
+        
+        const name = document.getElementById('bayName').value;
+        if (!name || startX === currentX) return alert("Enter a name and draw a box!");
+
+        const payload = {
+            camera_id: currentCameraId,
+            bay_name: name,
+            x_min: Math.min(startX, currentX),
+            y_min: Math.min(startY, currentY),
+            x_max: Math.max(startX, currentX),
+            y_max: Math.max(startY, currentY)
+        };
+
+        try {
+            await fetch(API_URL_BAYS, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            document.getElementById('bayName').value = '';
+            clearCurrentDrawing();
+            loadBays(); 
+        } catch (e) { alert("Failed to save bay"); }
+    }
+
+    async function deleteBay(id) {
+        if (!confirm("Delete this bay?")) return;
+        try {
+            await fetch(`${API_URL_BAYS}/${id}`, { method: 'DELETE' });
+            loadBays();
+        } catch (e) { alert("Failed to delete"); }
+    }
+
+    // Start
+    init();
+</script>
+</body>
+</html>

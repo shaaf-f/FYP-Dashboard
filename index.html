@@ -9,7 +9,11 @@
     <style>
         body { background-color: #f4f7f6; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
         .sidebar { height: 100vh; background: #2c3e50; color: white; padding-top: 20px; overflow-y: auto; }
+        
+        /* Updated Video Container */
         .camera-container { background: #000; border-radius: 8px; position: relative; overflow: hidden; aspect-ratio: 16/9; }
+        .camera-feed { width: 100%; height: 100%; object-fit: fill; position: absolute; top: 0; left: 0; }
+        
         .bay-card { transition: transform 0.2s; cursor: pointer; border-left: 5px solid #bdc3c7; }
         .bay-card.occupied { border-left-color: #e74c3c; }
         .bay-card.vacant { border-left-color: #2ecc71; }
@@ -31,10 +35,12 @@
         <div class="col-md-9 p-4">
             <div class="d-flex justify-content-between align-items-center mb-4">
                 <h2>Facility Overview <span class="badge bg-info" style="font-size: 0.5em;">Live Sync</span></h2>
-                <div class="btn-group">
-                    <button class="btn btn-outline-primary active">Camera 01</button>
-                    <button class="btn btn-outline-primary">Camera 02</button>
-                    <button class="btn btn-primary ms-3"><i class="fas fa-plus"></i> Define Bay</button>
+                
+                <div class="d-flex">
+                    <div class="btn-group" id="camera-buttons">
+                        <span class="text-muted mt-2 me-3">Loading cameras...</span>
+                    </div>
+                    <a href="setup.html" class="btn btn-primary ms-3"><i class="fas fa-cog"></i> Setup Bays</a>
                 </div>
             </div>
 
@@ -59,10 +65,10 @@
                 </div>
             </div>
 
-            <div class="camera-container shadow-lg d-flex align-items-center justify-content-center">
-                <div class="text-center text-white-50">
+            <div class="camera-container shadow-lg d-flex align-items-center justify-content-center" id="main-video-container">
+                <div class="text-center text-white-50" id="video-placeholder">
                     <i class="fas fa-video fa-3x mb-3 d-block"></i>
-                    <p id="stream-status">Waiting for Video Pipeline...</p>
+                    <p>Select a camera to view feed</p>
                 </div>
             </div>
         </div>
@@ -70,19 +76,62 @@
 </div>
 
 <script>
+    const API_BASE = 'http://127.0.0.1:8000/api';
+
+    // 1. Fetch cameras and build dynamic buttons
+    async function initCameras() {
+        try {
+            const res = await fetch(`${API_BASE}/cameras`);
+            const data = await res.json();
+            const btnContainer = document.getElementById('camera-buttons');
+            btnContainer.innerHTML = '';
+
+            if (data.cameras.length === 0) {
+                btnContainer.innerHTML = '<span class="text-muted mt-2 d-inline-block">No cameras added.</span>';
+                return;
+            }
+
+            // Create a button for each camera
+            data.cameras.forEach((cam, index) => {
+                const isActive = index === 0 ? 'active' : '';
+                btnContainer.innerHTML += `<button class="btn btn-outline-primary ${isActive}" onclick="switchCamera('${cam.stream_index}', this)">${cam.camera_name}</button>`;
+                
+                // Auto-load the first camera stream
+                if (index === 0) {
+                    switchCamera(cam.stream_index, btnContainer.firstChild);
+                }
+            });
+        } catch (e) {
+            console.error("Camera Fetch Error:", e);
+        }
+    }
+
+    // 2. Switch the active video feed
+    function switchCamera(streamIndex, btnElement) {
+        const container = document.getElementById('main-video-container');
+        
+        // Remove placeholder and inject the video feed img tag
+        container.innerHTML = `<img src="${API_BASE}/video_feed/${streamIndex}" class="camera-feed" alt="Live Stream">`;
+        
+        // Update button colors (remove active from all, add to clicked)
+        document.querySelectorAll('#camera-buttons .btn').forEach(b => b.classList.remove('active'));
+        if(btnElement) btnElement.classList.add('active');
+    }
+
+    // 3. Your existing dashboard sync logic
     async function refreshDashboard() {
         try {
-            const response = await fetch('http://127.0.0.1:8000/api/dashboard/status');
+            const response = await fetch(`${API_BASE}/dashboard/status`);
             if (!response.ok) throw new Error("Backend offline");
             
             const data = await response.json();
 
-            // 1. Update Stats Header
+            // Update Stats Header
             document.getElementById('stat-total').innerText = data.stats.total;
             document.getElementById('stat-occupied').innerText = data.stats.occupied;
             document.getElementById('stat-vacant').innerText = data.stats.vacant;
 
-            // 2. Clear and Rebuild Bay List
+            // Clear and Rebuild Bay List
             const listContainer = document.getElementById('bay-list');
             listContainer.innerHTML = ''; 
 
@@ -91,10 +140,8 @@
                 const cardClass = isOccupied ? 'occupied' : 'vacant';
                 const badgeClass = isOccupied ? 'bg-danger' : 'bg-success';
                 
-                // Vehicle Logic
                 let vehicleInfo = "No vehicle detected";
                 if (isOccupied) {
-                    // Check if we have the details from the scraper/database
                     if (bay.make) {
                         vehicleInfo = `<strong>${bay.last_plate_detected}</strong><br>${bay.make} ${bay.vehicle_model} (${bay.model_year})`;
                     } else {
@@ -120,9 +167,9 @@
         }
     }
 
-    // Refresh every 2 seconds
+    // Start everything up
+    initCameras();
     setInterval(refreshDashboard, 2000);
-    // Initial immediate call
     refreshDashboard();
 </script>
 
