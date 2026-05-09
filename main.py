@@ -233,7 +233,7 @@ def scrape_vehicle(reg_no):
             uc=True, 
             user_data_dir=selected_profile, 
             headless=False,
-            incognito=False
+            incognito=False,
         )
     except Exception as e:
         print(f"Driver Init Failed: {e}")
@@ -248,27 +248,38 @@ def scrape_vehicle(reg_no):
         # Captcha logic
         driver.switch_to_frame('iframe[title="reCAPTCHA"]')
         driver.uc_click("span#recaptcha-anchor")
-        driver.switch_to_default_window()
+        
+        # FIX 2: Switch back to default content (more reliable than window)
+        driver.switch_to_default_content() 
 
-        # Wait for Token
+        # FIX 3: Wait for Token with an existence check
+        token = ""
         for _ in range(60):
-            token = driver.get_attribute('textarea#g-recaptcha-response', 'value')
-            if token and len(token) > 20:
-                break
+            try:
+                # Use JS to check the value so we don't crash if the element is hidden
+                token = driver.execute_script("return document.getElementById('g-recaptcha-response').value;")
+                if token and len(token) > 20:
+                    break
+            except:
+                pass
             time.sleep(1)
+
+        if not token:
+            print(f"Scrape Error for {reg_no}: Recaptcha token not found after 60s.")
+            return None
 
         # Forced JS Click
         time.sleep(2)
         driver.js_click("button#search_veh")
         
-        # Extraction based on your verified indices
+        # Extraction logic
         time.sleep(5)
         cells = driver.find_elements("css selector", "table td")
         
         if len(cells) > 6:
             return {
                 "registration_no": cells[4].text.strip(),
-                "details": cells[5].text.strip(), # This has Make, Model, Year
+                "details": cells[5].text.strip(), 
                 "engine_no": cells[6].text.strip()
             }
         return None
