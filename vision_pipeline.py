@@ -97,16 +97,34 @@ class ANPRPipeline:
         if not all_candidates: return "", "not_found"
         return Counter(all_candidates).most_common(1)[0][0], "voted_consensus"
 
-    def process_bay_image(self, bay_img):
-        """Takes an image of a parking bay, finds the plate, and reads it."""
+    def process_bay_image(self, bay_img, bay_name="Unknown"):
+        """Takes an image of a parking bay, draws detection boxes, and reads text."""
         if bay_img is None or bay_img.size == 0: return None
         
-        # 1. Detect plate in the bay
-        res = self.detector.predict(bay_img, conf=0.25, verbose=False)[0]
-        if len(res.boxes) == 0: return None
+        # 1. Detect plate
+        res = self.detector.predict(bay_img, conf=0.15, verbose=False)[0] # Dropped conf slightly for diagnosis
         
-        # 2. Get best box
+        # Create a copy for debugging
+        debug_img = bay_img.copy()
+        
+        if len(res.boxes) == 0:
+            # Save the image even if nothing is found to confirm YOLO saw nothing
+            cv2.putText(debug_img, "NO DETECTION", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            cv2.imwrite(f"debug_yolo_{bay_name}.jpg", debug_img)
+            return None
+        
+        # 2. Draw ALL detected boxes for debugging
         boxes = res.boxes.data.cpu().numpy()
+        for box in boxes:
+            bx1, by1, bx2, by2, bconf, bcls = box
+            cv2.rectangle(debug_img, (int(bx1), int(by1)), (int(bx2), int(by2)), (0, 255, 0), 2)
+            cv2.putText(debug_img, f"Plate: {bconf:.2f}", (int(bx1), int(by1)-10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+        # Save the annotated image
+        cv2.imwrite(f"debug_yolo_{bay_name}.jpg", debug_img)
+
+        # 3. Get best box for OCR
         best = max(boxes, key=lambda x: x[4])
         pad = 15
         x1, y1, x2, y2 = max(0, int(best[0])-pad), max(0, int(best[1])-pad), \
@@ -114,6 +132,6 @@ class ANPRPipeline:
         
         plate_crop = bay_img[y1:y2, x1:x2]
         
-        # 3. Read text
+        # 4. Read text
         pred_plate, _ = self.run_easyocr_on_crop(plate_crop)
         return pred_plate if pred_plate else None
