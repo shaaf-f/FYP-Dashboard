@@ -25,8 +25,8 @@ app.add_middleware(
 
 # Configuration
 PROFILES = [
-    "C:/Users/GamingPC/AppData/Local/Google/Chrome/User Data/Default",
-    "C:/Users/GamingPC/AppData/Local/Google/Chrome/User Data/Profile 1"
+    # "C:/Users/sajal/AppData/Local/Google/Chrome/User Data/Default",
+    "C:/Users/sajal/AppData/Local/Google/Chrome/User Data/Profile 12"
 ]
 
 def get_db_connection():
@@ -250,7 +250,7 @@ def scrape_vehicle(reg_no):
         driver.uc_click("span#recaptcha-anchor")
         
         # FIX 2: Switch back to default content (more reliable than window)
-        driver.switch_to_default_content() 
+        driver.switch_to.default_content() 
 
         # FIX 3: Wait for Token with an existence check
         token = ""
