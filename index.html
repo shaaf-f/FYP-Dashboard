@@ -3,216 +3,284 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Admin Dashboard</title>
-
+    <title>VRMS Admin Dashboard</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/all.min.css">
-
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <style>
-        body {
-            background-color: #f4f7f6;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        /* Brand Colors */
+        :root {
+            --brand-gradient: linear-gradient(135deg, #00c6ff 0%, #0072ff 100%);
+            --brand-solid: #0072ff;
+            --dark-slate: #2c3e50;
+            --light-bg: #f4f7f6;
         }
 
-        .sidebar {
-            height: 100vh;
-            background: #2c3e50;
+        body { background-color: var(--light-bg); font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        
+        /* Sidebar */
+        .sidebar { height: 100vh; background: var(--dark-slate); color: white; padding-top: 20px; overflow-y: auto; }
+        
+        /* Video & Cards */
+        .camera-container { background: #000; border-radius: 12px; position: relative; overflow: hidden; aspect-ratio: 16/9; }
+        .camera-feed { width: 100%; height: 100%; object-fit: fill; position: absolute; top: 0; left: 0; }
+        
+        /* Overlay Canvas */
+        #overlay-canvas { z-index: 10; pointer-events: none; background: transparent; }
+        
+        .bay-card { transition: transform 0.2s; cursor: pointer; border-left: 5px solid #bdc3c7; border-radius: 8px; }
+        .bay-card.occupied { border-left-color: #e74c3c; }
+        .bay-card.vacant { border-left-color: #2ecc71; }
+        
+        .status-badge { font-size: 0.75rem; text-transform: uppercase; }
+        .badge-brand { background: var(--brand-solid); color: white; }
+        .loader-dots { font-size: 0.8rem; color: #3498db; }
+
+        /* Consistently Styled Buttons */
+        .btn-brand { 
+            background: var(--brand-gradient); 
+            border: none; 
+            color: white; 
+            transition: opacity 0.2s;
+        }
+        .btn-brand:hover { color: white; opacity: 0.9; }
+        
+        .btn-outline-brand {
+            border: 2px solid var(--brand-solid);
+            color: var(--brand-solid);
+            background: transparent;
+        }
+        .btn-outline-brand:hover {
+            background: var(--brand-solid);
             color: white;
-            padding-top: 20px;
-            overflow-y: auto;
         }
 
-        .camera-container {
-            background: #000;
-            border-radius: 8px;
+        /* iOS Style Toggle Switch */
+        .switch {
             position: relative;
-            overflow: hidden;
-            aspect-ratio: 16/9;
+            display: inline-block;
+            width: 44px;
+            height: 24px;
         }
-
-        .camera-feed {
-            width: 100%;
-            height: 100%;
-            object-fit: fill;
+        .switch input { 
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .slider {
             position: absolute;
+            cursor: pointer;
             top: 0;
             left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #cbd5e1;
+            transition: .3s;
+            border-radius: 24px;
+            box-shadow: inset 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 18px;
+            width: 18px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: .3s;
+            border-radius: 50%;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+        input:checked + .slider {
+            background: var(--brand-solid);
+        }
+        input:checked + .slider:before {
+            transform: translateX(20px);
         }
 
-        .bay-card {
-            transition: transform 0.2s;
-            cursor: pointer;
-            border-left: 5px solid #bdc3c7;
-        }
-
-        .bay-card.occupied {
-            border-left-color: #e74c3c;
-        }
-
-        .bay-card.vacant {
-            border-left-color: #2ecc71;
-        }
-
-        .status-badge {
-            font-size: 0.75rem;
-            text-transform: uppercase;
-        }
-
-        .loader-dots {
-            font-size: 0.8rem;
-            color: #3498db;
-        }
-
-        /* LLM Assistant Panel */
-        .llm-card {
-            border: none;
-            border-radius: 12px;
-            overflow: hidden;
-        }
-
-        .llm-card .card-header {
-            background: #2c3e50;
+        /* Floating AI Orb */
+        .chat-orb {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            width: 65px;
+            height: 65px;
+            background: var(--brand-gradient);
             color: white;
+            border-radius: 50%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 1.6rem;
+            cursor: pointer;
+            box-shadow: 0 4px 15px rgba(0, 114, 255, 0.4);
+            z-index: 1050;
+            transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+            animation: pulse-glow 2s infinite;
+        }
+
+        @keyframes pulse-glow {
+            0% { box-shadow: 0 0 0 0 rgba(0, 114, 255, 0.6); }
+            70% { box-shadow: 0 0 0 15px rgba(0, 114, 255, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(0, 114, 255, 0); }
+        }
+
+        .chat-orb:hover {
+            transform: translateY(-5px) scale(1.05);
+            box-shadow: 0 10px 25px rgba(0, 114, 255, 0.5);
+            animation: none;
+        }
+
+        .chat-orb:active { transform: scale(0.9); }
+
+        /* Chat Popup */
+        .chat-popup {
+            position: fixed;
+            bottom: 110px;
+            right: 30px;
+            width: 400px;
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 15px 35px rgba(0,0,0,0.15);
+            z-index: 1050;
+            display: flex; 
+            flex-direction: column;
+            overflow: hidden;
+            border: 1px solid rgba(0,0,0,0.05);
+            
+            opacity: 0;
+            visibility: hidden;
+            transform: translateY(20px) scale(0.9);
+            transform-origin: bottom right;
+            transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+
+        .chat-popup.show-chat {
+            opacity: 1;
+            visibility: visible;
+            transform: translateY(0) scale(1);
+        }
+
+        .chat-header {
+            background: var(--brand-gradient);
+            color: white;
+            padding: 18px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
             font-weight: 600;
         }
 
-        #llm-question {
-            resize: vertical;
-            min-height: 80px;
-        }
-
-        #llm-answer {
-            white-space: pre-wrap;
-            font-size: 1rem;
-            line-height: 1.6;
-        }
-
+        .chat-body { padding: 20px; max-height: 60vh; overflow-y: auto; }
+        
         #llm-sql {
             display: none;
             background: #111827;
-            color: #e5e7eb;
+            color: #10b981; 
             padding: 12px;
             border-radius: 8px;
-            font-size: 0.85rem;
+            font-size: 0.8rem;
+            font-family: 'Courier New', Courier, monospace;
             overflow-x: auto;
-        }
-
-        #llm-error {
-            display: none;
         }
     </style>
 </head>
-
 <body>
 
 <div class="container-fluid">
     <div class="row">
-
-        <!-- Sidebar -->
         <div class="col-md-3 sidebar shadow">
-            <h4 class="text-center mb-4">Parking Bays</h4>
-
+            <h4 class="text-center mb-4"><i class="fas fa-car-side me-2"></i>VRMS</h4>
             <div id="bay-list" class="px-2">
                 <div class="text-center text-white-50">Loading bays...</div>
             </div>
         </div>
 
-        <!-- Main Content -->
         <div class="col-md-9 p-4">
-
-            <!-- Header -->
             <div class="d-flex justify-content-between align-items-center mb-4">
-                <h2>
-                    Facility Overview
-                    <span class="badge bg-info" style="font-size: 0.5em;">Live Sync</span>
-                </h2>
-
-                <div class="d-flex">
-                    <div class="btn-group" id="camera-buttons">
-                        <span class="text-muted mt-2 me-3">Loading cameras...</span>
+                <h2>Facility Overview <span class="badge badge-brand" style="font-size: 0.5em; vertical-align: middle;">LIVE SYNC</span></h2>
+                
+                <div class="d-flex align-items-center">
+                    <div class="d-flex align-items-center me-4 bg-white px-3 py-1 rounded-pill shadow-sm border">
+                        <span class="small fw-bold text-muted me-2" style="font-size: 0.75rem;">OVERLAY</span>
+                        <label class="switch mb-0">
+                            <input type="checkbox" id="toggleBays" checked onchange="toggleBaysOverlay()">
+                            <span class="slider"></span>
+                        </label>
                     </div>
 
-                    <a href="setup.html" class="btn btn-primary ms-3">
-                        <i class="fas fa-cog"></i> Setup Bays
-                    </a>
+                    <div class="btn-group shadow-sm" id="camera-buttons">
+                        <span class="text-muted mt-2 me-3">Detecting Cameras...</span>
+                    </div>
+                    <a href="setup.html" class="btn btn-brand ms-3 shadow-sm"><i class="fas fa-cog me-1"></i> Setup Bays</a>
                 </div>
             </div>
 
-            <!-- Stats Cards -->
             <div class="row mb-4 text-center">
                 <div class="col-md-4">
-                    <div class="card p-3 shadow-sm">
-                        <h5 class="text-muted">Total Bays</h5>
-                        <h3 id="stat-total">0</h3>
+                    <div class="card p-3 shadow-sm border-0">
+                        <h5 class="text-muted small text-uppercase fw-bold">Total Capacity</h5>
+                        <h3 id="stat-total" class="mb-0">0</h3>
                     </div>
                 </div>
-
                 <div class="col-md-4">
-                    <div class="card p-3 shadow-sm text-danger">
-                        <h5>Occupied</h5>
-                        <h3 id="stat-occupied">0</h3>
+                    <div class="card p-3 shadow-sm border-0">
+                        <h5 class="text-danger small text-uppercase fw-bold">Occupied</h5>
+                        <h3 id="stat-occupied" class="mb-0 text-danger">0</h3>
                     </div>
                 </div>
-
                 <div class="col-md-4">
-                    <div class="card p-3 shadow-sm text-success">
-                        <h5>Available</h5>
-                        <h3 id="stat-vacant">0</h3>
+                    <div class="card p-3 shadow-sm border-0">
+                        <h5 class="text-success small text-uppercase fw-bold">Available</h5>
+                        <h3 id="stat-vacant" class="mb-0 text-success">0</h3>
                     </div>
                 </div>
             </div>
 
-            <!-- LLM Assistant Card -->
-            <div class="card shadow-sm mb-4 llm-card">
-                <div class="card-header">
-                    <i class="fas fa-robot me-2"></i> Ask Vehicle Database
-                </div>
-
-                <div class="card-body">
-                    <p class="text-muted mb-2">
-                        Ask questions about vehicles, registration numbers, makes, models, bays, or recent updates.
-                    </p>
-
-                    <textarea
-                        id="llm-question"
-                        class="form-control mb-3"
-                        placeholder="Example: How many Toyota vehicles?"
-                    ></textarea>
-
-                    <div class="d-flex align-items-center gap-2 mb-3">
-                        <button class="btn btn-dark" onclick="askVehicleLLM()">
-                            <i class="fas fa-paper-plane me-1"></i> Ask
-                        </button>
-
-                        <button class="btn btn-outline-secondary" onclick="clearLLMBox()">
-                            Clear
-                        </button>
-
-                        <span id="llm-loading" class="text-muted" style="display: none;">
-                            Thinking...
-                        </span>
+            <div class="camera-container shadow-lg" id="main-video-container">
+                <div id="no-camera-msg" class="d-flex h-100 align-items-center justify-content-center text-white-50">
+                    <div class="text-center">
+                        <i class="fas fa-video fa-3x mb-3 d-block"></i>
+                        <p>Initialize Camera Feed</p>
                     </div>
-
-                    <div id="llm-error" class="alert alert-danger py-2"></div>
-
-                    <h6 class="text-muted">Answer</h6>
-                    <div id="llm-answer" class="alert alert-light border">
-                        Ask a question to get an answer.
-                    </div>
-
-                    <pre id="llm-sql"></pre>
                 </div>
+                <img id="live-feed" class="camera-feed" style="display:none;">
+                <canvas id="overlay-canvas" class="camera-feed" width="1920" height="1080" style="display:none;"></canvas>
             </div>
-
-            <!-- Camera Feed -->
-            <div class="camera-container shadow-lg d-flex align-items-center justify-content-center" id="main-video-container">
-                <div class="text-center text-white-50" id="video-placeholder">
-                    <i class="fas fa-video fa-3x mb-3 d-block"></i>
-                    <p>Select a camera to view feed</p>
-                </div>
-            </div>
-
         </div>
+    </div>
+</div>
+
+<div class="chat-orb" id="chat-orb" onclick="toggleChat()">
+    <i id="orb-icon" class="fas fa-search"></i>
+</div>
+
+<div class="chat-popup" id="chat-popup">
+    <div class="chat-header">
+        <span><i class="fas fa-robot me-2"></i>AI Search Assistant</span>
+        <i class="fas fa-times" style="cursor: pointer;" onclick="toggleChat()"></i>
+    </div>
+    
+    <div class="chat-body">
+        <p class="text-muted small mb-3">Ask about vehicle makes, specific plates, or bay occupancy.</p>
+        <textarea id="llm-question" class="form-control mb-3" placeholder="e.g. Find all white Toyotas" style="border-radius: 10px;"></textarea>
+
+        <div class="d-flex align-items-center gap-2 mb-3">
+            <button class="btn btn-brand btn-sm px-4 rounded-pill" onclick="askVehicleLLM()">
+                <i class="fas fa-paper-plane me-1"></i> Send
+            </button>
+            <button class="btn btn-light btn-sm rounded-pill" onclick="clearLLMBox()">Clear</button>
+            <span id="llm-loading" class="text-muted small ms-2" style="display: none;">
+                <i class="fas fa-circle-notch fa-spin"></i>
+            </span>
+        </div>
+
+        <div id="llm-error" class="alert alert-danger py-2 small" style="display: none;"></div>
+
+        <div id="llm-answer" class="p-3 bg-light rounded-3 small border-0" style="min-height: 50px;">
+            <span class="text-muted italic">Ready for your query...</span>
+        </div>
+
+        <pre id="llm-sql" class="mt-3"></pre>
     </div>
 </div>
 
@@ -220,206 +288,189 @@
     const API_BASE = 'http://127.0.0.1:8000/api';
     const SCHEMA_LLM_API = 'http://127.0.0.1:8001/api/ask-db';
 
-    // 1. Fetch cameras and build dynamic buttons
+    // Global State Variables
+    let currentCameraId = null;
+    let showBaysOverlay = true;
+    let globalBaysCoordinates = [];
+    let dashboardStatusBays = [];
+
+    function toggleChat() {
+        const popup = document.getElementById('chat-popup');
+        const icon = document.getElementById('orb-icon');
+        const isOpen = popup.classList.toggle('show-chat');
+        
+        icon.style.transform = "scale(0) rotate(90deg)";
+        setTimeout(() => {
+            icon.className = isOpen ? "fas fa-times" : "fas fa-search";
+            icon.style.transform = "scale(1) rotate(0deg)";
+        }, 150);
+
+        if(isOpen) setTimeout(() => document.getElementById('llm-question').focus(), 400);
+    }
+
     async function initCameras() {
         try {
             const res = await fetch(`${API_BASE}/cameras`);
             const data = await res.json();
             const btnContainer = document.getElementById('camera-buttons');
-            btnContainer.innerHTML = '';
+            const cameras = data.cameras || data;
 
-            if (data.cameras.length === 0) {
-                btnContainer.innerHTML = '<span class="text-muted mt-2 d-inline-block">No cameras added.</span>';
+            if (!cameras.length) {
+                btnContainer.innerHTML = '<span class="text-muted small mt-2">No Cameras Found</span>';
                 return;
             }
 
-            data.cameras.forEach((cam, index) => {
-                const isActive = index === 0 ? 'active' : '';
-
-                btnContainer.innerHTML += `
-                    <button class="btn btn-outline-primary ${isActive}" onclick="switchCamera('${cam.stream_index}', this)">
-                        ${cam.camera_name}
-                    </button>
-                `;
-
-                if (index === 0) {
-                    switchCamera(cam.stream_index, btnContainer.firstChild);
-                }
+            let html = '';
+            cameras.forEach((cam, i) => {
+                const active = i === 0 ? 'active' : '';
+                html += `<button class="btn btn-outline-brand btn-sm ${active}" onclick="switchCamera('${cam.stream_index}', ${cam.id}, this)">${cam.camera_name}</button>`;
             });
-
-        } catch (e) {
-            console.error("Camera Fetch Error:", e);
-        }
+            btnContainer.innerHTML = html;
+            
+            if (cameras.length) {
+                switchCamera(cameras[0].stream_index, cameras[0].id, btnContainer.firstElementChild);
+            }
+        } catch (e) { console.error(e); }
     }
 
-    // 2. Switch the active video feed
-    function switchCamera(streamIndex, btnElement) {
-        const container = document.getElementById('main-video-container');
-
-        container.innerHTML = `
-            <img src="${API_BASE}/video_feed/${streamIndex}" class="camera-feed" alt="Live Stream">
-        `;
-
+    function switchCamera(idx, camId, btn) {
+        currentCameraId = parseInt(camId);
+        
+        const feed = document.getElementById('live-feed');
+        const noCamMsg = document.getElementById('no-camera-msg');
+        const canvas = document.getElementById('overlay-canvas');
+        
+        feed.src = `${API_BASE}/video_feed/${idx}`;
+        feed.style.display = 'block';
+        canvas.style.display = 'block';
+        noCamMsg.style.display = 'none';
+        
         document.querySelectorAll('#camera-buttons .btn').forEach(b => b.classList.remove('active'));
+        if(btn) btn.classList.add('active');
 
-        if (btnElement) {
-            btnElement.classList.add('active');
-        }
+        drawOverlay();
     }
 
-    // 3. Dashboard sync logic
+    function toggleBaysOverlay() {
+        showBaysOverlay = document.getElementById('toggleBays').checked;
+        drawOverlay();
+    }
+
+    function drawOverlay() {
+        const canvas = document.getElementById('overlay-canvas');
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        if (!showBaysOverlay || !currentCameraId) return;
+
+        const camBays = globalBaysCoordinates.filter(b => b.camera_id === currentCameraId);
+        
+        camBays.forEach(bay => {
+            const dashBay = dashboardStatusBays.find(db => db.bay_name === bay.bay_name);
+            const isOcc = dashBay && dashBay.current_status === 'occupied';
+            const colorCode = isOcc ? '#e74c3c' : '#2ecc71'; 
+            
+            ctx.strokeStyle = colorCode;
+            ctx.lineWidth = 4;
+            const w = bay.x_max - bay.x_min;
+            const h = bay.y_max - bay.y_min;
+            ctx.strokeRect(bay.x_min, bay.y_min, w, h);
+            
+            ctx.fillStyle = colorCode;
+            ctx.font = 'bold 30px Arial';
+            ctx.fillText(bay.bay_name, bay.x_min + 10, bay.y_min + 35);
+        });
+    }
+
     async function refreshDashboard() {
         try {
-            const response = await fetch(`${API_BASE}/dashboard/status`);
-
-            if (!response.ok) {
-                throw new Error("Backend offline");
-            }
-
-            const data = await response.json();
+            const res = await fetch(`${API_BASE}/dashboard/status`);
+            const data = await res.json();
+            
+            const baysRes = await fetch(`${API_BASE}/bays`);
+            const baysData = await baysRes.json();
+            
+            globalBaysCoordinates = baysData.bays || baysData;
+            dashboardStatusBays = data.bays || [];
 
             document.getElementById('stat-total').innerText = data.stats.total;
             document.getElementById('stat-occupied').innerText = data.stats.occupied;
             document.getElementById('stat-vacant').innerText = data.stats.vacant;
 
-            const listContainer = document.getElementById('bay-list');
-            listContainer.innerHTML = '';
-
-            data.bays.forEach(bay => {
-                const isOccupied = bay.current_status === 'occupied';
-                const cardClass = isOccupied ? 'occupied' : 'vacant';
-                const badgeClass = isOccupied ? 'bg-danger' : 'bg-success';
-
-                let vehicleInfo = "No vehicle detected";
-
-                if (isOccupied) {
+            const list = document.getElementById('bay-list');
+            list.innerHTML = dashboardStatusBays.map(bay => {
+                const isOcc = bay.current_status === 'occupied';
+                
+                let vehicleInfo = 'Empty';
+                if (isOcc) {
                     if (bay.make) {
-                        vehicleInfo = `
-                            <strong>${bay.last_plate_detected}</strong><br>
-                            ${bay.make} ${bay.vehicle_model} (${bay.model_year})
-                        `;
+                        // Dynamically construct string based on available parameters
+                        let details = bay.make;
+                        if (bay.vehicle_model) details += ` ${bay.vehicle_model}`;
+                        if (bay.model_year) details += ` (${bay.model_year})`;
+                        
+                        vehicleInfo = `<strong>${bay.last_plate_detected || 'Unknown Plate'}</strong><br>${details}`;
                     } else {
-                        vehicleInfo = `
-                            <strong>${bay.last_plate_detected}</strong><br>
-                            <span class="loader-dots">Identifying details...</span>
-                        `;
+                        vehicleInfo = `<strong>${bay.last_plate_detected || 'Unknown Plate'}</strong><br><span class="loader-dots">Identifying details...</span>`;
                     }
                 }
 
-                listContainer.innerHTML += `
-                    <div class="card mb-2 bay-card ${cardClass} shadow-sm">
+                return `
+                    <div class="card mb-2 bay-card ${isOcc ? 'occupied' : 'vacant'} shadow-sm border-0">
                         <div class="card-body p-2">
-                            <div class="d-flex justify-content-between align-items-center mb-1">
-                                <h6 class="mb-0">${bay.bay_name}</h6>
-                                <span class="badge ${badgeClass} status-badge">${bay.current_status}</span>
+                            <div class="d-flex justify-content-between align-items-center">
+                                <h6 class="mb-0 small fw-bold">${bay.bay_name}</h6>
+                                <span class="badge ${isOcc ? 'bg-danger' : 'bg-success'} status-badge">${bay.current_status}</span>
                             </div>
-                            <small class="text-muted" style="line-height: 1.2;">${vehicleInfo}</small>
+                            <small class="text-muted d-block mt-1" style="font-size: 0.75rem;">
+                                ${vehicleInfo}
+                            </small>
                         </div>
-                    </div>
-                `;
-            });
+                    </div>`;
+            }).join('');
 
-        } catch (err) {
-            console.error("Sync Error:", err);
-            document.getElementById('bay-list').innerHTML = `
-                <div class="alert alert-warning py-1 m-2">
-                    Backend Connection Lost...
-                </div>
-            `;
-        }
+            drawOverlay();
+
+        } catch (e) { console.error(e); }
     }
 
-    // 4. Extract SQL from backend response
-    function getFinalSql(data) {
-        if (data && data.debug && data.debug.sql) {
-            return data.debug.sql;
-        }
-
-        if (data && data.schema_link_debug && data.schema_link_debug.final_sql) {
-            return data.schema_link_debug.final_sql;
-        }
-
-        return "";
-    }
-
-    // 5. Ask LLM function
     async function askVehicleLLM() {
-        const questionBox = document.getElementById('llm-question');
-        const answerBox = document.getElementById('llm-answer');
-        const sqlBox = document.getElementById('llm-sql');
-        const loading = document.getElementById('llm-loading');
-        const errorBox = document.getElementById('llm-error');
-
-        const question = questionBox.value.trim();
-
-        if (!question) {
-            answerBox.innerText = "Please type a question first.";
-            return;
-        }
-
-        loading.style.display = "inline";
-        errorBox.style.display = "none";
-        errorBox.innerText = "";
-        answerBox.innerText = "";
-        sqlBox.style.display = "none";
-        sqlBox.innerText = "";
+        const q = document.getElementById('llm-question').value;
+        const ans = document.getElementById('llm-answer');
+        const sql = document.getElementById('llm-sql');
+        const load = document.getElementById('llm-loading');
+        
+        if (!q.trim()) return;
+        load.style.display = 'inline';
+        ans.innerHTML = '<span class="text-muted">Analyzing database...</span>';
+        sql.style.display = 'none';
 
         try {
-            const response = await fetch(SCHEMA_LLM_API, {
+            const res = await fetch(SCHEMA_LLM_API, {
                 method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    "X-Pipeline-Config": "full_pipeline",
-                    "X-LLM-Model": "qwen2.5-coder:7b"
-                },
-                body: JSON.stringify({
-                    question: question
-                })
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ question: q })
             });
-
-            const data = await response.json();
-
-            if (!response.ok) {
-                errorBox.style.display = "block";
-                errorBox.innerText = data.detail || "The LLM request failed.";
-                answerBox.innerText = "Could not get an answer.";
-                return;
-            }
-
-            const finalSql = getFinalSql(data);
-
-            // Human-readable answer now comes directly from backend LLM answer generation
-            answerBox.innerText = data.answer || "No answer returned.";
-
+            const data = await res.json();
+            ans.innerText = data.answer || "No result found.";
+            const finalSql = data.debug?.sql || data.schema_link_debug?.final_sql;
             if (finalSql) {
-                sqlBox.style.display = "block";
-                sqlBox.innerText = "SQL used:\n" + finalSql;
+                sql.style.display = 'block';
+                sql.innerText = finalSql;
             }
-
-        } catch (error) {
-            errorBox.style.display = "block";
-            errorBox.innerText = "Could not connect to schema-linked backend. Make sure main_schema_linked.py is running on port 8001.";
-            answerBox.innerText = "Connection failed.";
-        } finally {
-            loading.style.display = "none";
-        }
+        } catch (e) { ans.innerText = "Connection error."; }
+        finally { load.style.display = 'none'; }
     }
 
-    // 6. Clear LLM box
     function clearLLMBox() {
         document.getElementById('llm-question').value = "";
-        document.getElementById('llm-answer').innerText = "Ask a question to get an answer.";
+        document.getElementById('llm-answer').innerHTML = '<span class="text-muted italic">Ready for your query...</span>';
         document.getElementById('llm-sql').style.display = "none";
-        document.getElementById('llm-sql').innerText = "";
-        document.getElementById('llm-error').style.display = "none";
-        document.getElementById('llm-error').innerText = "";
     }
 
-    // Start everything up
     initCameras();
     setInterval(refreshDashboard, 2000);
     refreshDashboard();
 </script>
-
 </body>
 </html>

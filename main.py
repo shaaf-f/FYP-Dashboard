@@ -82,8 +82,9 @@ def ai_vision_worker():
         try:
             db = get_db_connection()
             cursor = db.cursor(dictionary=True)
+            # Added last_plate_detected to the query to populate the state correctly
             cursor.execute("""
-                SELECT b.id, b.bay_name, b.x_min, b.y_min, b.x_max, b.y_max, b.current_status, c.stream_index
+                SELECT b.id, b.bay_name, b.x_min, b.y_min, b.x_max, b.y_max, b.current_status, b.last_plate_detected, c.stream_index
                 FROM parking_bays b
                 JOIN cameras c ON b.camera_id = c.id
             """)
@@ -100,32 +101,30 @@ def ai_vision_worker():
                     bay_crop = frame[bay['y_min']:bay['y_max'], bay['x_min']:bay['x_max']]
                     if bay_crop.size == 0: continue
 
-                    # 1. Get current tracking state
-                    # Ensure our tracker knows the DB's truth at startup
+                    # 1. Get current tracking state (Separated status and plate)
                     state = BAY_STATES.get(bay_id, {
-                        "current_raw": bay['current_status'], 
+                        "current_raw": bay['last_plate_detected'], 
                         "streak": 0, 
-                        "confirmed": bay['current_status']
+                        "confirmed_status": bay['current_status'],
+                        "confirmed_plate": bay['last_plate_detected']
                     })
 
                     # 2. THE MOTION GATE
                     last_crop = BAY_LAST_CROPS.get(bay_id)
                     is_moving = check_motion(last_crop, bay_crop)
 
-                    # If nothing moved AND we aren't waiting to confirm a previous movement... SLEEP!
                     if not is_moving and state["streak"] == 0:
                         continue 
 
-                    # We passed the gate! Save the new crop and wake up YOLO.
                     BAY_LAST_CROPS[bay_id] = bay_crop.copy()
                     
                     # 3. RUN YOLO
                     detected_plate = pipeline.process_bay_image(bay_crop, bay_name)
                     
                     # 4. FAST-TRACK ENTRY LOGIC (Vacant -> Occupied)
-                    if state['confirmed'] == 'vacant' and detected_plate:
+                    if state['confirmed_status'] == 'vacant' and detected_plate:
                         print(f"  [MOTION] New vehicle entering {bay_name}: {detected_plate}. Double checking...")
-                        time.sleep(0.5) # Wait half a second for the car to stop shaking
+                        time.sleep(0.5) 
                         
                         fresh_frame = LATEST_FRAMES[stream_idx]
                         fresh_crop = fresh_frame[bay['y_min']:bay['y_max'], bay['x_min']:bay['x_max']]
@@ -133,14 +132,17 @@ def ai_vision_worker():
                         
                         if second_check == detected_plate:
                             print(f"  >>> [CONFIRMED ENTRY] {bay_name} is OCCUPIED by {second_check} <<<")
-                            state['confirmed'] = 'occupied'
+                            state['confirmed_status'] = 'occupied'
+                            state['confirmed_plate'] = second_check
                             state['streak'] = 0
                             BAY_STATES[bay_id] = state
+                            
                             update_cursor.execute("UPDATE parking_bays SET current_status = 'occupied', last_plate_detected = %s WHERE id = %s", (second_check, bay_id))
+                            update_cursor.execute("INSERT INTO events_history (bay_id, registration_no, entry_time) VALUES (%s, %s, NOW())", (bay_id, second_check))
                             db.commit()
-                            continue # Move to next bay
+                            continue 
 
-                    # 5. STANDARD DEBOUNCE LOGIC (Occupied -> Vacant, or false alarms)
+                    # 5. STANDARD DEBOUNCE LOGIC
                     if state["current_raw"] == detected_plate:
                         state["streak"] += 1
                     else:
@@ -149,19 +151,35 @@ def ai_vision_worker():
                     
                     BAY_STATES[bay_id] = state
 
-                    # Confirming a change (Usually a car leaving)
-                    if state["streak"] >= DEBOUNCE_LIMIT and state["confirmed"] != detected_plate:
-                        state["confirmed"] = 'vacant' if not detected_plate else 'occupied'
-                        state["streak"] = 0
-                        BAY_STATES[bay_id] = state
+                    if state["streak"] >= DEBOUNCE_LIMIT:
+                        new_status = 'occupied' if detected_plate else 'vacant'
                         
-                        if detected_plate:
-                            print(f"  >>> [PLATE UPDATED] {bay_name} changed to {detected_plate} <<<")
-                            update_cursor.execute("UPDATE parking_bays SET current_status = 'occupied', last_plate_detected = %s WHERE id = %s", (detected_plate, bay_id))
-                        else:
-                            print(f"  >>> [EXIT] {bay_name} is now VACANT <<<")
-                            update_cursor.execute("UPDATE parking_bays SET current_status = 'vacant' WHERE id = %s", (bay_id,))
-                        
+                        is_status_change = state["confirmed_status"] != new_status
+                        is_plate_change = (new_status == 'occupied') and (state["confirmed_plate"] != detected_plate)
+
+                        if is_status_change or is_plate_change:
+                            if new_status == 'vacant':
+                                print(f"  >>> [EXIT] {bay_name} is now VACANT <<<")
+                                update_cursor.execute("UPDATE parking_bays SET current_status = 'vacant', last_plate_detected = NULL WHERE id = %s", (bay_id,))
+                                update_cursor.execute("UPDATE events_history SET exit_time = NOW() WHERE bay_id = %s AND exit_time IS NULL", (bay_id,))
+                                
+                            elif new_status == 'occupied':
+                                if is_status_change:
+                                    print(f"  >>> [ENTRY] {bay_name} occupied by {detected_plate} <<<")
+                                    update_cursor.execute("INSERT INTO events_history (bay_id, registration_no, entry_time) VALUES (%s, %s, NOW())", (bay_id, detected_plate))
+                                else:
+                                    # Handles the edge case where one car leaves and another enters instantly, or a read-correction happens
+                                    print(f"  >>> [PLATE UPDATED] {bay_name} changed to {detected_plate} <<<")
+                                    update_cursor.execute("UPDATE events_history SET exit_time = NOW() WHERE bay_id = %s AND exit_time IS NULL", (bay_id,))
+                                    update_cursor.execute("INSERT INTO events_history (bay_id, registration_no, entry_time) VALUES (%s, %s, NOW())", (bay_id, detected_plate))
+
+                                update_cursor.execute("UPDATE parking_bays SET current_status = 'occupied', last_plate_detected = %s WHERE id = %s", (detected_plate, bay_id))
+
+                            state["confirmed_status"] = new_status
+                            state["confirmed_plate"] = detected_plate if new_status == 'occupied' else None
+                            state["streak"] = 0
+                            BAY_STATES[bay_id] = state
+                            
                         db.commit()
 
             db.close()
@@ -295,6 +313,50 @@ DEBOUNCE_LIMIT = 2
 def is_live_stream(stream_str):
     """Returns True if it's a webcam or IP camera, False if it's a video file."""
     return stream_str.isdigit() or str(stream_str).lower().startswith(('rtsp://', 'http://', 'https://'))
+
+def event_merge_worker():
+    print("Event Merge Worker: Thread started successfully.")
+    while True:
+        try:
+            db = get_db_connection()
+            cursor = db.cursor(dictionary=True)
+            
+            # Find adjacent events for the same vehicle in the same bay with a gap of 5 mins or less
+            query = """
+                SELECT e1.id AS id1, e2.id AS id2, e2.exit_time AS new_exit
+                FROM events_history e1
+                JOIN events_history e2 
+                  ON e1.bay_id = e2.bay_id 
+                  AND e1.registration_no = e2.registration_no 
+                  AND e1.id < e2.id
+                WHERE e1.exit_time IS NOT NULL
+                  AND TIMESTAMPDIFF(SECOND, e1.exit_time, e2.entry_time) <= 300
+                  AND NOT EXISTS (
+                      SELECT 1 FROM events_history e3 
+                      WHERE e3.bay_id = e1.bay_id AND e3.registration_no = e1.registration_no
+                      AND e3.id > e1.id AND e3.id < e2.id
+                  )
+            """
+            cursor.execute(query)
+            pairs = cursor.fetchall()
+            
+            if pairs:
+                update_cursor = db.cursor()
+                for pair in pairs:
+                    # Update the old entry with the newer exit time
+                    update_cursor.execute("UPDATE events_history SET exit_time = %s WHERE id = %s", (pair['new_exit'], pair['id1']))
+                    # Delete the newer fragmented entry
+                    update_cursor.execute("DELETE FROM events_history WHERE id = %s", (pair['id2'],))
+                
+                db.commit()
+                print(f"Event Merge Worker: Merged {len(pairs)} obstructed view split records.")
+            
+            db.close()
+        except Exception as e:
+            print(f"Event Merge Worker Error: {e}")
+        
+        # Runs every 3 minutes
+        time.sleep(180)
 
 def camera_manager_worker():
     print("Camera Manager: Starting up...")
@@ -530,7 +592,8 @@ def delete_bay(bay_id: int):
 
 threading.Thread(target=camera_manager_worker, daemon=True).start()
 threading.Thread(target=ai_vision_worker, daemon=True).start()
-threading.Thread(target=background_worker, daemon=True).start() # Your scraper worker
+threading.Thread(target=background_worker, daemon=True).start() # scraper worker
+threading.Thread(target=event_merge_worker, daemon=True).start() # Added Merge Thread
 
 if __name__ == "__main__":
     import uvicorn
