@@ -26,7 +26,9 @@ app.add_middleware(
 # Configuration
 PROFILES = [
     # "C:/Users/sajal/AppData/Local/Google/Chrome/User Data/Default",
-    "C:/Users/sajal/AppData/Local/Google/Chrome/User Data/Profile 12"
+    # "C:/Users/sajal/AppData/Local/Google/Chrome/User Data/Profile 12",
+    "C:/Users/GamingPC/AppData/Local/Google/Chrome/User Data/Profile 1",
+    "C:/Users/GamingPC/AppData/Local/Google/Chrome/User Data/Default",
 ]
 
 def get_db_connection():
@@ -46,6 +48,7 @@ def split_vehicle_details(details_str):
         
         return make, model, year
     return details_str, "Unknown", "Unknown"
+
 # --- 3. UPDATED AI WORKER (With Debouncing) --- 
 
 def check_motion(img1, img2, threshold=25, min_change_ratio=0.08):
@@ -74,15 +77,19 @@ def check_motion(img1, img2, threshold=25, min_change_ratio=0.08):
     return (changed_pixels / total_pixels) > min_change_ratio
 
 def ai_vision_worker():
-    print("AI Vision Worker: Starting up (Motion-Gated Mode)...")
+    print("AI Vision Worker: Starting up (Pure Motion + Debounce + Auto-Heal)...")
     from vision_pipeline import ANPRPipeline
     pipeline = ANPRPipeline() 
+    
+    local_states = {}
+    last_sweep_time = time.time()
+    SWEEP_INTERVAL = 30 
+    DEBOUNCE_LIMIT = 3  # Number of consecutive identical reads required to confirm
     
     while True:
         try:
             db = get_db_connection()
             cursor = db.cursor(dictionary=True)
-            # Added last_plate_detected to the query to populate the state correctly
             cursor.execute("""
                 SELECT b.id, b.bay_name, b.x_min, b.y_min, b.x_max, b.y_max, b.current_status, b.last_plate_detected, c.stream_index
                 FROM parking_bays b
@@ -96,96 +103,154 @@ def ai_vision_worker():
                 bay_name = bay['bay_name']
                 stream_idx = str(bay['stream_index'])
                 
-                if stream_idx in LATEST_FRAMES:
-                    frame = LATEST_FRAMES[stream_idx]
-                    bay_crop = frame[bay['y_min']:bay['y_max'], bay['x_min']:bay['x_max']]
-                    if bay_crop.size == 0: continue
-
-                    # 1. Get current tracking state (Separated status and plate)
-                    state = BAY_STATES.get(bay_id, {
-                        "current_raw": bay['last_plate_detected'], 
-                        "streak": 0, 
-                        "confirmed_status": bay['current_status'],
-                        "confirmed_plate": bay['last_plate_detected']
-                    })
-
-                    # 2. THE MOTION GATE
-                    last_crop = BAY_LAST_CROPS.get(bay_id)
-                    is_moving = check_motion(last_crop, bay_crop)
-
-                    if not is_moving and state["streak"] == 0:
-                        continue 
-
-                    BAY_LAST_CROPS[bay_id] = bay_crop.copy()
+                if stream_idx not in LATEST_FRAMES:
+                    continue
                     
-                    # 3. RUN YOLO
+                frame = LATEST_FRAMES[stream_idx]
+                bay_crop = frame[bay['y_min']:bay['y_max'], bay['x_min']:bay['x_max']]
+                if bay_crop.size == 0: continue
+
+                if bay_id not in local_states:
+                    local_states[bay_id] = {
+                        'status': bay['current_status'],
+                        'motion_streak': 0,
+                        'settled_streak': 0,
+                        'is_in_motion_event': False,
+                        'verifying': False,
+                        'verification_attempts': 0,
+                        'current_raw': None,
+                        'plate_streak': 0
+                    }
+
+                state = local_states[bay_id]
+                last_crop = BAY_LAST_CROPS.get(bay_id)
+
+                # 1. Pixel Comparison (Motion Only)
+                is_moving = check_motion(last_crop, bay_crop, threshold=25, min_change_ratio=0.1)
+                BAY_LAST_CROPS[bay_id] = bay_crop.copy()
+
+                # 2. Track Movement
+                if is_moving:
+                    state['motion_streak'] += 1
+                    state['settled_streak'] = 0
+                else:
+                    state['settled_streak'] += 1
+                    state['motion_streak'] = 0
+
+                # 3. Motion Gate
+                if state['motion_streak'] >= 3 and not state['is_in_motion_event']:
+                    state['is_in_motion_event'] = True
+                    state['verifying'] = False  # Cancel any ongoing verification if car moves again
+                    print(f"[{bay_name}] Motion detected. Waiting for bay to settle...")
+
+                if state['is_in_motion_event'] and state['settled_streak'] >= 10:
+                    state['is_in_motion_event'] = False
+                    state['verifying'] = True
+                    state['verification_attempts'] = 0
+                    state['current_raw'] = None
+                    state['plate_streak'] = 0
+                    print(f"[{bay_name}] Settled. Commencing YOLO verification...")
+
+                # 4. Debounce Verification Loop
+                if state['verifying']:
                     detected_plate = pipeline.process_bay_image(bay_crop, bay_name)
+                    state['verification_attempts'] += 1
                     
-                    # 4. FAST-TRACK ENTRY LOGIC (Vacant -> Occupied)
-                    if state['confirmed_status'] == 'vacant' and detected_plate:
-                        print(f"  [MOTION] New vehicle entering {bay_name}: {detected_plate}. Double checking...")
-                        time.sleep(0.5) 
-                        
-                        fresh_frame = LATEST_FRAMES[stream_idx]
-                        fresh_crop = fresh_frame[bay['y_min']:bay['y_max'], bay['x_min']:bay['x_max']]
-                        second_check = pipeline.process_bay_image(fresh_crop, bay_name)
-                        
-                        if second_check == detected_plate:
-                            print(f"  >>> [CONFIRMED ENTRY] {bay_name} is OCCUPIED by {second_check} <<<")
-                            state['confirmed_status'] = 'occupied'
-                            state['confirmed_plate'] = second_check
-                            state['streak'] = 0
-                            BAY_STATES[bay_id] = state
-                            
-                            update_cursor.execute("UPDATE parking_bays SET current_status = 'occupied', last_plate_detected = %s WHERE id = %s", (second_check, bay_id))
-                            update_cursor.execute("INSERT INTO events_history (bay_id, registration_no, entry_time) VALUES (%s, %s, NOW())", (bay_id, second_check))
-                            db.commit()
-                            continue 
-
-                    # 5. STANDARD DEBOUNCE LOGIC
-                    if state["current_raw"] == detected_plate:
-                        state["streak"] += 1
+                    if state['current_raw'] == detected_plate:
+                        state['plate_streak'] += 1
                     else:
-                        state["current_raw"] = detected_plate
-                        state["streak"] = 1
-                    
-                    BAY_STATES[bay_id] = state
-
-                    if state["streak"] >= DEBOUNCE_LIMIT:
-                        new_status = 'occupied' if detected_plate else 'vacant'
+                        state['current_raw'] = detected_plate
+                        state['plate_streak'] = 1
                         
-                        is_status_change = state["confirmed_status"] != new_status
-                        is_plate_change = (new_status == 'occupied') and (state["confirmed_plate"] != detected_plate)
-
-                        if is_status_change or is_plate_change:
-                            if new_status == 'vacant':
-                                print(f"  >>> [EXIT] {bay_name} is now VACANT <<<")
-                                update_cursor.execute("UPDATE parking_bays SET current_status = 'vacant', last_plate_detected = NULL WHERE id = %s", (bay_id,))
-                                update_cursor.execute("UPDATE events_history SET exit_time = NOW() WHERE bay_id = %s AND exit_time IS NULL", (bay_id,))
-                                
-                            elif new_status == 'occupied':
-                                if is_status_change:
-                                    print(f"  >>> [ENTRY] {bay_name} occupied by {detected_plate} <<<")
-                                    update_cursor.execute("INSERT INTO events_history (bay_id, registration_no, entry_time) VALUES (%s, %s, NOW())", (bay_id, detected_plate))
-                                else:
-                                    # Handles the edge case where one car leaves and another enters instantly, or a read-correction happens
-                                    print(f"  >>> [PLATE UPDATED] {bay_name} changed to {detected_plate} <<<")
-                                    update_cursor.execute("UPDATE events_history SET exit_time = NOW() WHERE bay_id = %s AND exit_time IS NULL", (bay_id,))
-                                    update_cursor.execute("INSERT INTO events_history (bay_id, registration_no, entry_time) VALUES (%s, %s, NOW())", (bay_id, detected_plate))
-
-                                update_cursor.execute("UPDATE parking_bays SET current_status = 'occupied', last_plate_detected = %s WHERE id = %s", (detected_plate, bay_id))
-
-                            state["confirmed_status"] = new_status
-                            state["confirmed_plate"] = detected_plate if new_status == 'occupied' else None
-                            state["streak"] = 0
-                            BAY_STATES[bay_id] = state
+                    if state['plate_streak'] >= DEBOUNCE_LIMIT:
+                        state['verifying'] = False
+                        
+                        if state['status'] == 'vacant' and detected_plate:
+                            print(f"  >>> [ENTRY CONFIRMED] {bay_name} occupied by {detected_plate} <<<")
+                            state['status'] = 'occupied'
+                            update_cursor.execute("UPDATE parking_bays SET current_status = 'occupied', last_plate_detected = %s WHERE id = %s", (detected_plate, bay_id))
+                            update_cursor.execute("INSERT INTO events_history (bay_id, registration_no, entry_time) VALUES (%s, %s, NOW())", (bay_id, detected_plate))
+                            db.commit()
                             
-                        db.commit()
+                        elif state['status'] == 'occupied' and not detected_plate:
+                            print(f"  >>> [EXIT CONFIRMED] {bay_name} is now VACANT <<<")
+                            state['status'] = 'vacant'
+                            update_cursor.execute("UPDATE parking_bays SET current_status = 'vacant', last_plate_detected = NULL WHERE id = %s", (bay_id,))
+                            update_cursor.execute("UPDATE events_history SET exit_time = NOW() WHERE bay_id = %s AND exit_time IS NULL", (bay_id,))
+                            db.commit()
+                            
+                        elif state['status'] == 'occupied' and detected_plate and detected_plate != bay['last_plate_detected']:
+                            print(f"  >>> [READ CORRECTED] {bay_name} updated to {detected_plate} <<<")
+                            update_cursor.execute("UPDATE events_history SET exit_time = NOW() WHERE bay_id = %s AND exit_time IS NULL", (bay_id,))
+                            update_cursor.execute("INSERT INTO events_history (bay_id, registration_no, entry_time) VALUES (%s, %s, NOW())", (bay_id, detected_plate))
+                            update_cursor.execute("UPDATE parking_bays SET current_status = 'occupied', last_plate_detected = %s WHERE id = %s", (detected_plate, bay_id))
+                            db.commit()
+                            
+                    elif state['verification_attempts'] >= 6:
+                        state['verifying'] = False
+                        print(f"[{bay_name}] Verification aborted (No stable read after 6 frames).")
+
+                local_states[bay_id] = state
+
+            # 5. PERIODIC FACILITY WIDE SWEEP
+            current_time = time.time()
+            if current_time - last_sweep_time > SWEEP_INTERVAL:
+                print("** Running Periodic Auto-Heal Sweep **")
+                last_sweep_time = current_time
+                
+                # Pass 1: Vacant Bays (High Priority)
+                for bay in bays:
+                    bay_id = bay['id']
+                    state = local_states.get(bay_id)
+                    stream_idx = str(bay['stream_index'])
+                    
+                    if state and state['status'] == 'vacant' and stream_idx in LATEST_FRAMES:
+                        frame = LATEST_FRAMES[stream_idx]
+                        sweep_crop = frame[bay['y_min']:bay['y_max'], bay['x_min']:bay['x_max']]
+                        if sweep_crop.size == 0: continue
+                        
+                        detected = pipeline.process_bay_image(sweep_crop, bay['bay_name'])
+                        if detected:
+                            print(f"  >>> [SWEEP CORRECTION] Ghost vehicle found in {bay['bay_name']}: {detected} <<<")
+                            state['status'] = 'occupied'
+                            local_states[bay_id] = state
+                            
+                            update_cursor.execute("UPDATE parking_bays SET current_status = 'occupied', last_plate_detected = %s WHERE id = %s", (detected, bay_id))
+                            update_cursor.execute("INSERT INTO events_history (bay_id, registration_no, entry_time) VALUES (%s, %s, NOW())", (bay_id, detected))
+                            db.commit()
+
+                # Pass 2: Occupied Bays (Verification)
+                for bay in bays:
+                    bay_id = bay['id']
+                    state = local_states.get(bay_id)
+                    stream_idx = str(bay['stream_index'])
+                    
+                    if state and state['status'] == 'occupied' and stream_idx in LATEST_FRAMES:
+                        frame = LATEST_FRAMES[stream_idx]
+                        sweep_crop = frame[bay['y_min']:bay['y_max'], bay['x_min']:bay['x_max']]
+                        if sweep_crop.size == 0: continue
+                        
+                        detected = pipeline.process_bay_image(sweep_crop, bay['bay_name'])
+                        if not detected:
+                            print(f"  >>> [SWEEP CORRECTION] {bay['bay_name']} is actually VACANT <<<")
+                            state['status'] = 'vacant'
+                            local_states[bay_id] = state
+                            
+                            update_cursor.execute("UPDATE parking_bays SET current_status = 'vacant', last_plate_detected = NULL WHERE id = %s", (bay_id,))
+                            update_cursor.execute("UPDATE events_history SET exit_time = NOW() WHERE bay_id = %s AND exit_time IS NULL", (bay_id,))
+                            db.commit()
+                        elif bay['last_plate_detected'] and detected != bay['last_plate_detected']:
+                            print(f"  >>> [SWEEP CORRECTION] {bay['bay_name']} plate updated to {detected} <<<")
+                            update_cursor.execute("UPDATE events_history SET exit_time = NOW() WHERE bay_id = %s AND exit_time IS NULL", (bay_id,))
+                            update_cursor.execute("INSERT INTO events_history (bay_id, registration_no, entry_time) VALUES (%s, %s, NOW())", (bay_id, detected))
+                            update_cursor.execute("UPDATE parking_bays SET current_status = 'occupied', last_plate_detected = %s WHERE id = %s", (detected, bay_id))
+                            db.commit()
 
             db.close()
         except Exception as e:
             print(f"AI Vision Worker Error: {e}")
-        time.sleep(0.5)
+        
+        time.sleep(0.1)
 
 
 def background_worker():
@@ -393,6 +458,7 @@ def camera_manager_worker():
                 # If it's a file, skip 2 frames to simulate real-time playback
                 # (Assuming the original video is 30fps and we loop 10 times a sec)
                 if not is_live_stream(stream):
+                    caps[stream].grab()
                     caps[stream].grab()
                     caps[stream].grab()
                 
